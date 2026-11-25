@@ -1,0 +1,53 @@
+name: Qualify Markdown Paste in native compose editors
+on:
+  push:
+    branches:
+      - validation/markdown-paste-native
+    paths:
+      - native-compose-check.py
+      - .github/workflows/native-compose.yml
+
+permissions:
+  contents: read
+
+jobs:
+  qualify:
+    if: github.event.head_commit.message != 'Prepare isolated native compose validation'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    env:
+      PR7: a8723a6d0da80ecd00b6a28184d2d3af2cd62597
+      PR8: ad546409a8715a2d7c5e4b778abb05c8739f1301
+    steps:
+      - name: Fetch exact test sources and package the two revisions
+        run: |
+          set -euo pipefail
+          git clone --no-checkout --filter=blob:none https://github.com/RomainROCH/thunderbird-markdown-paste-extension.git src
+          git -C src show "$GITHUB_SHA:native-compose-check.py" > native-compose-check.py
+          for ref in "$PR7" "$PR8"; do
+            git -C src worktree add --detach "../$ref" "$ref"
+            test "$(git -C "$ref" rev-parse HEAD)" = "$ref"
+            pwsh -NoProfile -File "$ref/package.ps1"
+            sha256sum "$ref/markdown-paste.xpi"
+          done
+      - name: Prepare a private virtual display and pinned mail clients
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends xvfb xauth xclip xdotool libgtk-3-0t64 libdbus-glib-1-2 libasound2t64
+          tb_base=https://archive.mozilla.org/pub/thunderbird/releases/153.8.0esr
+          tb_file=linux-x86_64/en-US/thunderbird-153.8.0esr.tar.xz
+          curl --fail --silent --show-error --location --retry 2 "$tb_base/$tb_file" -o tb.tar.xz
+          curl --fail --silent --show-error --location --retry 2 "$tb_base/SHA256SUMS" -o tb.SHA256SUMS
+          awk -v target="$tb_file" '$2 == target {print $1 "  tb.tar.xz"}' tb.SHA256SUMS | sha256sum --check --strict
+          curl --fail --silent --show-error --location --retry 2 https://betterbird.eu/downloads/LinuxArchive/betterbird-153.8.0esr-bb14.en-US.linux-x86_64.tar.xz -o bb.tar.xz
+          mkdir tb bb
+          tar -xJf tb.tar.xz --strip-components=1 -C tb
+          tar -xJf bb.tar.xz --strip-components=1 -C bb
+          sha256sum tb.tar.xz bb.tar.xz
+      - name: Run the native editor qualification
+        run: |
+          set -euo pipefail
+          xvfb-run -a -s '-screen 0 1280x960x24 -nolisten tcp' python3 native-compose-check.py \
+            "$PWD/tb/thunderbird" "$PWD/bb/betterbird" \
+            "$PWD/$PR7/markdown-paste.xpi" "$PWD/$PR8/markdown-paste.xpi"
