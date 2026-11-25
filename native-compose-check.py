@@ -422,6 +422,31 @@ def theme_contrast(driver, dark, local_mail):
     return {"theme": theme, "colors": colors, "estimated_ratios": ratios, "local_draft": draft}
 
 
+
+def custom_compose_colors(driver):
+    theme = set_theme(driver, True)
+    driver.js("""
+        Services.prefs.setBoolPref("msgcompose.default_colors", false);
+        Services.prefs.setCharPref("msgcompose.text_color", "#202428");
+        Services.prefs.setCharPref("msgcompose.background_color", "#f4f8ff");
+        """)
+    compose(driver)
+    observe_paste(driver)
+    current = paste(driver, MARKDOWN)
+    assert current["source"] == [MARKDOWN], current
+    evidence = {
+        "theme": theme,
+        "prefers_dark": current["dark"],
+        "body": current["colors"][""],
+        "link": current["colors"]["a"],
+        "quote": current["colors"]["blockquote"],
+        "link_ratio": contrast(current["colors"]["a"][0], current["colors"]["a"][4]),
+        "quote_ratio": contrast(current["colors"]["blockquote"][0], current["colors"]["blockquote"][4]),
+    }
+    assert min(evidence["link_ratio"], evidence["quote_ratio"]) >= 4.5, evidence
+    return evidence
+
+
 def local_draft(driver, local_mail):
     import mailbox
 
@@ -523,8 +548,12 @@ def reply_preserves_quote(driver, scratch):
         MailServices.copy.copyFileMessage(file, folder, null, false, 0, "", {
           QueryInterface: ChromeUtils.generateQI(["nsIMsgCopyServiceListener"]),
           onStartCopy() {},
+          OnStartCopy() {},
           onProgress() {},
+          OnProgress() {},
           setMessageKey(value) { key = value; },
+          SetMessageKey(value) { key = value; },
+          OnStopCopy(status) { this.onStopCopy(status); },
           onStopCopy(status) {
             if (status !== Cr.NS_OK) { done("copy status: " + status); return; }
             try {
@@ -536,7 +565,7 @@ def reply_preserves_quote(driver, scratch):
               done("ok");
             } catch (error) { done(String(error)); }
           },
-        }, false);
+        }, null);
         """, str(fixture), asynchronous=True)
     assert result == "ok", result
     focus_compose(driver)
@@ -597,7 +626,8 @@ def run(binary, xpi, number):
                    ("reply-quote", lambda: reply_preserves_quote(driver, temporary))]
                 if number == 7 else
                 [("dark", lambda: theme_contrast(driver, True, local_mail)),
-                 ("light", lambda: theme_contrast(driver, False, local_mail))]
+                 ("light", lambda: theme_contrast(driver, False, local_mail)),
+                 ("custom-light-body-in-dark-theme", lambda: custom_compose_colors(driver))]
             )
             if number == 78:
                 cases = [("combined-undo", lambda: markdown_editing(driver, "plain")),
