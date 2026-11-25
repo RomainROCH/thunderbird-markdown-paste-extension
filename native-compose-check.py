@@ -137,7 +137,8 @@ def connect(port):
 
 COMPOSE_WINDOW = """
 const w = Services.wm.getMostRecentWindow("msgcompose");
-const d = w?.GetCurrentEditorElement()?.contentDocument;
+const editor = w?.document.getElementById("messageEditor");
+const d = editor?.contentDocument;
 """
 
 
@@ -175,7 +176,7 @@ def compose(driver, *, plain=False, signature=""):
     assert len(match) == 1, match
     subprocess.run(["xdotool", "windowfocus", match[0]], check=True, timeout=10)
     driver.js(COMPOSE_WINDOW + """
-        w.GetCurrentEditorElement().focus();
+        editor.focus();
         d.body.focus();
         """)
     retry(lambda: driver.js(COMPOSE_WINDOW + "return d.hasFocus();"), "compose focus")
@@ -222,7 +223,7 @@ def state(driver):
         };
         const canvas = d.createElement("span");
         canvas.style.backgroundColor = "Canvas";
-        body.append(canvas);
+        d.documentElement.append(canvas);
         const canvasColor = d.defaultView.getComputedStyle(canvas).backgroundColor;
         canvas.remove();
         return {
