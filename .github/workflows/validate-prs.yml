@@ -1,0 +1,44 @@
+name: Validate Markdown Paste PR 7 and PR 8
+on:
+  push:
+    branches:
+      - validation/markdown-paste-pr-7-8
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: npm test - ${{ matrix.revision }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - revision: upstream-1.0.4
+            sha: 06f0dc84f3a4bd8e3e197e5188fef55167b155cc
+          - revision: pr-7
+            sha: a8723a6d0da80ecd00b6a28184d2d3af2cd62597
+          - revision: pr-8
+            sha: ad546409a8715a2d7c5e4b778abb05c8739f1301
+    steps:
+      - name: Use Node.js 22
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22'
+      - name: Check out exact public revision and test
+        env:
+          TEST_SHA: ${{ matrix.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --no-checkout https://github.com/RomainROCH/thunderbird-markdown-paste-extension.git src
+          cd src
+          git checkout --detach "$TEST_SHA"
+          test "$(git rev-parse HEAD)" = "$TEST_SHA"
+          git log -1 --format=%H
+          node --version
+          npm --version
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm test
