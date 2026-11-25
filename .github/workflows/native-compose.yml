@@ -1,8 +1,8 @@
-name: Qualify Markdown Paste in native compose editors
+name: Qualify Markdown Paste on 140 ESR
 on:
   push:
     branches:
-      - validation/markdown-paste-native
+      - validation/markdown-paste-140-esr
     paths:
       - native-compose-check.py
       - .github/workflows/native-compose.yml
@@ -46,12 +46,13 @@ jobs:
           set -euo pipefail
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends xvfb xauth xclip xdotool libgtk-3-0t64 libdbus-glib-1-2 libasound2t64
-          tb_base=https://archive.mozilla.org/pub/thunderbird/releases/153.8.0esr
-          tb_file=linux-x86_64/en-US/thunderbird-153.8.0esr.tar.xz
+          tb_base=https://archive.mozilla.org/pub/thunderbird/releases/140.13.0esr
+          tb_file=linux-x86_64/en-US/thunderbird-140.13.0esr.tar.xz
           curl --fail --silent --show-error --location --retry 2 "$tb_base/$tb_file" -o tb.tar.xz
           curl --fail --silent --show-error --location --retry 2 "$tb_base/SHA256SUMS" -o tb.SHA256SUMS
           awk -v target="$tb_file" '$2 == target {print $1 "  tb.tar.xz"}' tb.SHA256SUMS | sha256sum --check --strict
-          curl --fail --silent --show-error --location --retry 2 https://betterbird.eu/downloads/LinuxArchive/betterbird-153.8.0esr-bb14.en-US.linux-x86_64.tar.xz -o bb.tar.xz
+          curl --fail --silent --show-error --location --retry 2 https://betterbird.eu/downloads/LinuxArchive/betterbird-140.13.0esr-bb25.en-US.linux-x86_64.tar.xz -o bb.tar.xz
+          echo 'd346c0c6c4f8dcde204f97f2d780d685530b9163d864bccd5c149456394ba1c0  bb.tar.xz' | sha256sum --check --strict
           mkdir tb bb
           tar -xJf tb.tar.xz --strip-components=1 -C tb
           tar -xJf bb.tar.xz --strip-components=1 -C bb
