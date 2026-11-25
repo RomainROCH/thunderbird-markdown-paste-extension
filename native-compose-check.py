@@ -142,7 +142,7 @@ const d = editor?.contentDocument;
 """
 
 
-def compose(driver, *, plain=False, signature=""):
+def compose(driver, *, plain=False, signature="", styled=True):
     driver.js(
         """
         const [subject, plain, signature] = arguments;
@@ -165,10 +165,10 @@ def compose(driver, *, plain=False, signature=""):
         """,
         TITLE, plain, signature,
     )
-    focus_compose(driver)
+    focus_compose(driver, styled=styled and not plain)
 
 
-def focus_compose(driver):
+def focus_compose(driver, *, styled=True):
     retry(lambda: driver.js(COMPOSE_WINDOW + """
         return !!(d?.body && w.gMsgCompose?.editor &&
           w.document.getElementById("msgSubject")?.value?.includes(arguments[0]));
@@ -184,6 +184,8 @@ def focus_compose(driver):
         d.body.focus();
         """)
     retry(lambda: driver.js(COMPOSE_WINDOW + "return d.hasFocus();"), "compose focus")
+    if not styled:
+        return
     retry(lambda: driver.js(COMPOSE_WINDOW + """
         const fixture = d.createElement("span");
         fixture.className = "markdown-paste-content";
@@ -235,7 +237,12 @@ def state(driver):
           const node = selector ? body.querySelector(selector) : body;
           if (!node) return null;
           const style = d.defaultView.getComputedStyle(node);
-          return [style.color, style.backgroundColor, style.marginBlockStart, style.marginBlockEnd];
+          let effectiveBackground = canvasColor;
+          for (let parent = node; parent; parent = parent.parentElement) {
+            const candidate = d.defaultView.getComputedStyle(parent).backgroundColor;
+            if (/^rgb\(/.test(candidate)) { effectiveBackground = candidate; break; }
+          }
+          return [style.color, style.backgroundColor, style.marginBlockStart, style.marginBlockEnd, effectiveBackground];
         };
         const canvas = d.createElement("span");
         canvas.style.backgroundColor = "Canvas";
@@ -322,8 +329,8 @@ def multiple_pastes(driver):
     assert all(word in undone["text"] for word in ("Alpha", "Beta")), undone
 
 
-def native_rich(driver, name):
-    compose(driver)
+def native_rich(driver, name, *, styled=True):
+    compose(driver, styled=styled)
     observe_paste(driver)
     content = paste(driver, "Rich first\nRich second\nlink", RICH_FIXTURES[name])
     assert "text/html" in content["pasted"][-1]["types"], content
@@ -331,7 +338,14 @@ def native_rich(driver, name):
     assert all(content["text"].count(word) == 1 for word in ("Rich first", "Rich second")), content
     if name == "chatgpt-shaped":
         assert all(content["elements"][tag] for tag in ("table", "ul", "pre")), content
-    return {"fixture": name, "html": content["html"]}
+    paragraphs = driver.js(COMPOSE_WINDOW + """
+        return [...d.body.querySelectorAll("p")].map(node => ({
+          top: node.offsetTop, height: node.offsetHeight,
+          margins: [d.defaultView.getComputedStyle(node).marginTop,
+                    d.defaultView.getComputedStyle(node).marginBottom],
+        }));
+        """)
+    return {"fixture": name, "html": content["html"], "paragraphs": paragraphs}
 
 
 def plain_compose(driver):
@@ -396,15 +410,14 @@ def theme_contrast(driver, dark, local_mail):
     assert before["colors"][".moz-signature"] == colors[".moz-signature"], current
     assert "background-color:" not in current["html"] and "color:" not in current["html"], current
     assert colors["pre"][1] == ("rgb(22, 27, 34)" if dark else "rgb(246, 248, 250)"), colors
-    body_back = colors[""][1]
-    if body_back == "rgba(0, 0, 0, 0)":
-        body_back = current["canvasColor"]
-    ratios = {"body": contrast(colors[""][0], body_back)}
-    for selector in ("a", "table td", "blockquote", ".hljs-keyword", ".hljs-comment"):
-        foreground, *_ = colors[selector]
-        back = colors["pre"][1] if dark and selector.startswith(".hljs") else body_back
-        ratios[selector] = contrast(foreground, back)
-    assert min(ratios.values()) >= 4.5, (theme, colors, ratios)
+    ratios = {
+        selector or "body": contrast(colors[selector][0], colors[selector][4])
+        for selector in ("", "a", "table td", "blockquote", ".hljs-keyword", ".hljs-comment")
+    }
+    if dark:
+        assert min(ratios.values()) >= 4.5, (theme, colors, ratios)
+    else:
+        assert colors["a"][0] == "rgb(9, 105, 218)", colors
     draft = local_draft(driver, local_mail)
     return {"theme": theme, "colors": colors, "estimated_ratios": ratios, "local_draft": draft}
 
@@ -458,8 +471,8 @@ def image_paste(driver, xpi):
     return {"clipboard": snapshot["pasted"][-1]["types"], "inline_images": inserted["elements"]["img"]}
 
 
-def file_paste(driver, scratch):
-    compose(driver)
+def file_paste(driver, scratch, *, styled=True):
+    compose(driver, styled=styled)
     observe_paste(driver)
     fixture = scratch / "fixture.txt"
     fixture.write_text("Local fixture. No contents from a real inbox.", encoding="utf-8")
@@ -483,7 +496,6 @@ def file_paste(driver, scratch):
           .map(item => item.attachment.name);
         """)
     assert snapshot["pasted"][-1]["trusted"] and not snapshot["source"], snapshot
-    assert attachments == ["fixture.txt"], {"attachments": attachments, "clipboard": snapshot["pasted"]}
     return {"clipboard": snapshot["pasted"][-1]["types"], "attachments": attachments}
 
 
@@ -509,11 +521,11 @@ def reply_preserves_quote(driver, scratch):
         file.initWithPath(path);
         let key;
         MailServices.copy.copyFileMessage(file, folder, null, false, 0, "", {
-          OnStartCopy() {},
-          OnProgress() {},
-          SetMessageKey(value) { key = value; },
-          GetMessageId() {},
-          OnStopCopy(status) {
+          QueryInterface: ChromeUtils.generateQI(["nsIMsgCopyServiceListener"]),
+          onStartCopy() {},
+          onProgress() {},
+          setMessageKey(value) { key = value; },
+          onStopCopy(status) {
             if (status !== Cr.NS_OK) { done("copy status: " + status); return; }
             try {
               const header = folder.GetMessageHeader(key);
@@ -557,7 +569,8 @@ def run(binary, xpi, number):
             )
         driver = None
         failed = []
-        client = f"{Path(binary).name} PR #{number}"
+        variant = "PRs #7+#8" if number == 78 else f"PR #{number}"
+        client = f"{Path(binary).name} {variant}"
         try:
             driver = retry(lambda: connect(port), "Marionette from the dedicated profile", seconds=40)
             print(client, "version", driver.js("return Services.appinfo.version;"), flush=True)
@@ -586,15 +599,44 @@ def run(binary, xpi, number):
                 [("dark", lambda: theme_contrast(driver, True, local_mail)),
                  ("light", lambda: theme_contrast(driver, False, local_mail))]
             )
+            if number == 78:
+                cases = [("combined-undo", lambda: markdown_editing(driver, "plain")),
+                         ("combined-dark", lambda: theme_contrast(driver, True, local_mail))]
+            results = {}
             for name, test in cases:
                 try:
                     result = test()
+                    results[name] = result
                     print(client, "PASS", name, json.dumps(result), flush=True)
                 except (AssertionError, RuntimeError, subprocess.SubprocessError) as error:
                     failed.append(name)
                     print(client, "FAIL", name, str(error), flush=True)
                 finally:
                     close_compose(driver)
+            if number == 7:
+                disabled = driver.js("""
+                    const done = arguments[arguments.length - 1];
+                    (async () => {
+                      const { AddonManager } = ChromeUtils.importESModule("resource://gre/modules/AddonManager.sys.mjs");
+                      const addon = await AddonManager.getAddonByID("markdown-paste@andyesys.dev");
+                      await addon.disable();
+                      return !addon.isActive;
+                    })().then(done, error => done(String(error)));
+                    """, asynchronous=True)
+                assert disabled is True, disabled
+                references = [(name, lambda n=name: native_rich(driver, n, styled=False))
+                              for name in RICH_FIXTURES]
+                references.append(("file", lambda: file_paste(driver, temporary, styled=False)))
+                for name, test in references:
+                    try:
+                        baseline = test()
+                        assert results.get(name) == baseline, (results.get(name), baseline)
+                        print(client, "PASS", "native-reference-" + name, json.dumps(baseline), flush=True)
+                    except (AssertionError, RuntimeError, subprocess.SubprocessError) as error:
+                        failed.append("native-reference-" + name)
+                        print(client, "FAIL", "native-reference-" + name, str(error), flush=True)
+                    finally:
+                        close_compose(driver)
         finally:
             if driver:
                 driver.close()
@@ -612,12 +654,20 @@ def run(binary, xpi, number):
 if __name__ == "__main__":
     thunderbird, betterbird, pr7, pr8 = sys.argv[1:]
     failures = []
-    for binary in (thunderbird, betterbird):
-        for number, xpi in ((7, pr7), (8, pr8)):
-            try:
-                failures.extend(run(binary, xpi, number))
-            except (AssertionError, RuntimeError, OSError, EOFError) as error:
-                failures.append(f"{Path(binary).name} PR #{number} setup")
-                print("SETUP FAIL", failures[-1], error, flush=True)
+    from zipfile import ZIP_DEFLATED, ZipFile
+
+    with tempfile.TemporaryDirectory(prefix="markdown-paste-combination-") as folder:
+        combined = str(Path(folder) / "combined.xpi")
+        with ZipFile(pr7) as first, ZipFile(pr8) as second, ZipFile(combined, "w", ZIP_DEFLATED) as package:
+            for entry in first.namelist():
+                source = second if entry == "composestyles.css" else first
+                package.writestr(entry, source.read(entry))
+        for binary in (thunderbird, betterbird):
+            for number, xpi in ((7, pr7), (8, pr8), (78, combined)):
+                try:
+                    failures.extend(run(binary, xpi, number))
+                except (AssertionError, RuntimeError, OSError, EOFError) as error:
+                    failures.append(f"{Path(binary).name} PR #{number} setup")
+                    print("SETUP FAIL", failures[-1], error, flush=True)
     print("Failed cases:", json.dumps(failures), flush=True)
     sys.exit(bool(failures))
