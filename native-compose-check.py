@@ -165,9 +165,13 @@ def compose(driver, *, plain=False, signature=""):
         """,
         TITLE, plain, signature,
     )
+    focus_compose(driver)
+
+
+def focus_compose(driver):
     retry(lambda: driver.js(COMPOSE_WINDOW + """
         return !!(d?.body && w.gMsgCompose?.editor &&
-          w.document.getElementById("msgSubject")?.value === arguments[0]);
+          w.document.getElementById("msgSubject")?.value?.includes(arguments[0]));
         """, TITLE), "the compose editor")
     match = subprocess.run(
         ["xdotool", "search", "--onlyvisible", "--name", TITLE],
@@ -180,6 +184,18 @@ def compose(driver, *, plain=False, signature=""):
         d.body.focus();
         """)
     retry(lambda: driver.js(COMPOSE_WINDOW + "return d.hasFocus();"), "compose focus")
+    retry(lambda: driver.js(COMPOSE_WINDOW + """
+        const fixture = d.createElement("span");
+        fixture.className = "markdown-paste-content";
+        const link = d.createElement("a");
+        link.href = "https://example.invalid/style-probe";
+        fixture.append(link);
+        d.body.append(fixture);
+        const ready = ["rgb(9, 105, 218)", "rgb(88, 166, 255)"]
+          .includes(d.defaultView.getComputedStyle(link).color);
+        fixture.remove();
+        return ready;
+        """), "the extension's compose stylesheet")
 
 
 def close_compose(driver):
@@ -333,7 +349,8 @@ def toggle(driver):
     subprocess.run(["xdotool", "type", "oggle **fixture**"], check=True, timeout=10)
     key("ctrl+alt+m")
     rendered = retry(lambda: current if (current := state(driver))["source"] else None, "Markdown toggle")
-    assert rendered["source"] == ["Toggle **fixture**"], rendered
+    assert len(rendered["source"]) == 1, rendered
+    assert rendered["source"][0].rstrip("\n") == "Toggle **fixture**", rendered
     key("ctrl+alt+m")
     restored = retry(lambda: current if not (current := state(driver))["source"] else None, "Markdown restoration")
     assert "Toggle **fixture**" in restored["text"], restored
@@ -366,7 +383,7 @@ def contrast(foreground, background):
     return round((second + 0.05) / (first + 0.05), 2)
 
 
-def theme_contrast(driver, dark):
+def theme_contrast(driver, dark, local_mail):
     theme = set_theme(driver, dark)
     compose(driver, signature="html")
     observe_paste(driver)
@@ -388,7 +405,137 @@ def theme_contrast(driver, dark):
         back = colors["pre"][1] if dark and selector.startswith(".hljs") else body_back
         ratios[selector] = contrast(foreground, back)
     assert min(ratios.values()) >= 4.5, (theme, colors, ratios)
-    return {"theme": theme, "colors": colors, "estimated_ratios": ratios}
+    draft = local_draft(driver, local_mail)
+    return {"theme": theme, "colors": colors, "estimated_ratios": ratios, "local_draft": draft}
+
+
+def local_draft(driver, local_mail):
+    import mailbox
+
+    drafts = local_mail / "Drafts"
+    before = drafts.stat().st_size
+    outcome = driver.js(COMPOSE_WINDOW + """
+        const done = arguments[arguments.length - 1];
+        w.SaveAsDraft().then(() => done("ok"), error => done(String(error)));
+        """, asynchronous=True)
+    assert outcome == "ok", outcome
+    retry(lambda: drafts.stat().st_size > before, "new local draft")
+    messages = mailbox.mbox(drafts, create=False)
+    try:
+        draft = list(messages)[-1]
+        decoded = [part.get_payload(decode=True).decode(part.get_content_charset() or "utf-8")
+                   for part in draft.walk() if part.get_content_type() == "text/html"]
+        draft_subject = draft["Subject"]
+    finally:
+        messages.close()
+    assert draft_subject == TITLE, draft_subject
+    assert len(decoded) == 1 and "GFM heading" in decoded[0], decoded
+    assert "markdown-paste-content" in decoded[0], decoded
+    assert not re.search(r"#(?:58a6ff|161b22|8b949e|ff7b72)|prefers-color-scheme",
+                         decoded[0], re.IGNORECASE), decoded[0]
+    return {"subject": draft_subject, "html_part": True, "extension_dark_palette_in_mime": False}
+
+
+def image_paste(driver, xpi):
+    from zipfile import ZipFile
+
+    compose(driver)
+    observe_paste(driver)
+    with ZipFile(xpi) as archive:
+        image = archive.read("icons/icon-48.png")
+    subprocess.run(["xclip", "-selection", "clipboard", "-t", "image/png"],
+                   input=image, stdout=subprocess.DEVNULL, check=True, timeout=10)
+    key("ctrl+v")
+    snapshot = retry(
+        lambda: current if (current := state(driver))["pasted"] else None,
+        "native image paste",
+    )
+    assert snapshot["pasted"][-1]["trusted"] and not snapshot["source"], snapshot
+    inserted = retry(
+        lambda: current if (current := state(driver))["elements"]["img"] else None,
+        "inline image insertion",
+    )
+    return {"clipboard": snapshot["pasted"][-1]["types"], "inline_images": inserted["elements"]["img"]}
+
+
+def file_paste(driver, scratch):
+    compose(driver)
+    observe_paste(driver)
+    fixture = scratch / "fixture.txt"
+    fixture.write_text("Local fixture. No contents from a real inbox.", encoding="utf-8")
+    driver.js("""
+        const path = arguments[0];
+        const file = Cc["@mozilla.org/file/local;1"].createInstance(Ci.nsIFile);
+        file.initWithPath(path);
+        const transfer = Cc["@mozilla.org/widget/transferable;1"].createInstance(Ci.nsITransferable);
+        transfer.init(null);
+        transfer.addDataFlavor("application/x-moz-file");
+        transfer.setTransferData("application/x-moz-file", file);
+        Services.clipboard.setData(transfer, null, Ci.nsIClipboard.kGlobalClipboard);
+        """, str(fixture))
+    key("ctrl+v")
+    snapshot = retry(
+        lambda: current if (current := state(driver))["pasted"] else None,
+        "native file paste",
+    )
+    attachments = driver.js(COMPOSE_WINDOW + """
+        return [...w.document.getElementById("attachmentBucket").itemChildren]
+          .map(item => item.attachment.name);
+        """)
+    assert snapshot["pasted"][-1]["trusted"] and not snapshot["source"], snapshot
+    assert attachments == ["fixture.txt"], {"attachments": attachments, "clipboard": snapshot["pasted"]}
+    return {"clipboard": snapshot["pasted"][-1]["types"], "attachments": attachments}
+
+
+def reply_preserves_quote(driver, scratch):
+    fixture = scratch / "quote.eml"
+    fixture.write_bytes((
+        "From: Fixture Contact <contact@example.invalid>\r\n"
+        "To: Fixture Sender <sender@example.invalid>\r\n"
+        "Subject: Markdown Paste qualification fixture\r\n"
+        "Date: Mon, 23 Nov 2026 12:00:00 +0000\r\n"
+        "Message-ID: <quote@example.invalid>\r\n"
+        "MIME-Version: 1.0\r\n"
+        "Content-Type: text/html; charset=utf-8\r\n\r\n"
+        "<p>Quoted original <b>fixture</b></p>\r\n"
+    ).encode())
+    result = driver.js("""
+        const path = arguments[0];
+        const done = arguments[arguments.length - 1];
+        const { MailServices } = ChromeUtils.importESModule("resource:///modules/MailServices.sys.mjs");
+        const root = MailServices.accounts.localFoldersServer.rootFolder;
+        const folder = root.getChildNamed("Drafts");
+        const file = Cc["@mozilla.org/file/local;1"].createInstance(Ci.nsIFile);
+        file.initWithPath(path);
+        let key;
+        MailServices.copy.copyFileMessage(file, folder, null, false, 0, "", {
+          OnStartCopy() {},
+          OnProgress() {},
+          SetMessageKey(value) { key = value; },
+          GetMessageId() {},
+          OnStopCopy(status) {
+            if (status !== Cr.NS_OK) { done("copy status: " + status); return; }
+            try {
+              const header = folder.GetMessageHeader(key);
+              const uri = folder.getUriForMsg(header);
+              const identity = MailServices.accounts.getAccount("account1").defaultIdentity;
+              MailServices.compose.OpenComposeWindow("", header, uri, Ci.nsIMsgCompType.Reply,
+                                                       Ci.nsIMsgCompFormat.HTML, identity, "", false);
+              done("ok");
+            } catch (error) { done(String(error)); }
+          },
+        }, false);
+        """, str(fixture), asynchronous=True)
+    assert result == "ok", result
+    focus_compose(driver)
+    observe_paste(driver)
+    quote = COMPOSE_WINDOW + 'return d.querySelector("blockquote[type=cite]")?.outerHTML;'
+    before = retry(lambda: driver.js(quote), "the original reply quotation")
+    assert "Quoted original" in before, before
+    driver.js(COMPOSE_WINDOW + "d.getSelection().collapse(d.body, 0);")
+    after = paste(driver, "Reply **marker**")
+    assert after["source"] == ["Reply **marker**"], after
+    assert driver.js(quote) == before, after
 
 
 def run(binary, xpi, number):
@@ -398,7 +545,7 @@ def run(binary, xpi, number):
             available_socket.bind(("127.0.0.1", 0))
             port = available_socket.getsockname()[1]
         profile = temporary / "profile"
-        make_profile(profile, port)
+        local_mail = make_profile(profile, port)
         log = temporary / "client.log"
         app_env = dict(os.environ, MOZ_REMOTE_ALLOW_SYSTEM_ACCESS="1",
                        MOZ_DISABLE_NONLOCAL_CONNECTIONS="1", MOZ_CRASHREPORTER_DISABLE="1",
@@ -432,9 +579,12 @@ def run(binary, xpi, number):
                  for signature in ("", "html", "plain")]
                 + [("consecutive-paste-and-selection", lambda: multiple_pastes(driver))]
                 + [(name, lambda n=name: native_rich(driver, n)) for name in RICH_FIXTURES]
-                + [("plain-compose", lambda: plain_compose(driver)), ("toggle", lambda: toggle(driver))]
+                + [("plain-compose", lambda: plain_compose(driver)), ("toggle", lambda: toggle(driver)),
+                   ("image", lambda: image_paste(driver, xpi)), ("file", lambda: file_paste(driver, temporary)),
+                   ("reply-quote", lambda: reply_preserves_quote(driver, temporary))]
                 if number == 7 else
-                [("dark", lambda: theme_contrast(driver, True)), ("light", lambda: theme_contrast(driver, False))]
+                [("dark", lambda: theme_contrast(driver, True, local_mail)),
+                 ("light", lambda: theme_contrast(driver, False, local_mail))]
             )
             for name, test in cases:
                 try:
