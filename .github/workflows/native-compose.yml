@@ -17,7 +17,7 @@ jobs:
     timeout-minutes: 12
     env:
       PR7: a8723a6d0da80ecd00b6a28184d2d3af2cd62597
-      PR8: ad546409a8715a2d7c5e4b778abb05c8739f1301
+      PR8: 48bdf09b9ebeb43ad1e7e56987d68f9232ee6461
     steps:
       - name: Fetch exact test sources and package the two revisions
         run: |
@@ -30,6 +30,17 @@ jobs:
             pwsh -NoProfile -File "$ref/package.ps1"
             sha256sum "$ref/markdown-paste.xpi"
           done
+      - name: Use Node.js 22 for the changed revision
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22'
+      - name: Run upstream tests on the revised PR 8
+        run: |
+          set -euo pipefail
+          cd "$PR8"
+          node --version
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm test
       - name: Prepare a private virtual display and pinned mail clients
         run: |
           set -euo pipefail

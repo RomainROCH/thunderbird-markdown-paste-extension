@@ -423,7 +423,7 @@ def theme_contrast(driver, dark, local_mail):
 
 
 
-def custom_compose_colors(driver):
+def custom_compose_colors(driver, local_mail):
     theme = set_theme(driver, True)
     driver.js("""
         Services.prefs.setBoolPref("msgcompose.default_colors", false);
@@ -444,6 +444,7 @@ def custom_compose_colors(driver):
         "quote_ratio": contrast(current["colors"]["blockquote"][0], current["colors"]["blockquote"][4]),
     }
     assert min(evidence["link_ratio"], evidence["quote_ratio"]) >= 4.5, evidence
+    evidence["local_draft"] = local_draft(driver, local_mail)
     return evidence
 
 
@@ -561,7 +562,7 @@ def reply_preserves_quote(driver, scratch):
               const uri = folder.getUriForMsg(header);
               const identity = MailServices.accounts.getAccount("account1").defaultIdentity;
               MailServices.compose.OpenComposeWindow("", header, uri, Ci.nsIMsgCompType.Reply,
-                                                       Ci.nsIMsgCompFormat.HTML, identity, "", false);
+                                                       Ci.nsIMsgCompFormat.HTML, identity, "", null);
               done("ok");
             } catch (error) { done(String(error)); }
           },
@@ -627,7 +628,7 @@ def run(binary, xpi, number):
                 if number == 7 else
                 [("dark", lambda: theme_contrast(driver, True, local_mail)),
                  ("light", lambda: theme_contrast(driver, False, local_mail)),
-                 ("custom-light-body-in-dark-theme", lambda: custom_compose_colors(driver))]
+                 ("custom-light-body-in-dark-theme", lambda: custom_compose_colors(driver, local_mail))]
             )
             if number == 78:
                 cases = [("combined-undo", lambda: markdown_editing(driver, "plain")),
